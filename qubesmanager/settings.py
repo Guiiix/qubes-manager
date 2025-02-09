@@ -24,6 +24,7 @@
 
 import collections
 import functools
+import os
 import re
 import subprocess
 import sys
@@ -53,7 +54,10 @@ SUPPORTED_SERVICE_PREFIX = "supported-service."
 IDLE_SUPPORTED_SERVICE = f"{SUPPORTED_SERVICE_PREFIX}shutdown-idle"
 IDLE_SERVICE = f"{SERVICE_PREFIX}shutdown-idle"
 
-INTERNAL_SERVICE_FEATURES = [IDLE_SERVICE]
+CUSTOM_PERSIST_PREFIX = 'custom-persist.'
+CUSTOM_PERSIST_SERVICE = f"{SERVICE_PREFIX}custom-persist"
+
+INTERNAL_SERVICE_FEATURES = [IDLE_SERVICE, CUSTOM_PERSIST_SERVICE]
 INTERNAL_SUPPORTED_FEATURES = [IDLE_SUPPORTED_SERVICE]
 
 # pylint: disable=too-few-public-methods
@@ -136,6 +140,7 @@ class VMSettingsWindow(ui_settingsdlg.Ui_SettingsDialog, QtWidgets.QDialog):
         ('devices', 3),
         ('applications', 4),
         ('services', 5),
+        ('persistence', 6),
         ))
 
     def __init__(self, vm, init_page="basic", qapp=None, qubesapp=None,
@@ -238,6 +243,24 @@ class VMSettingsWindow(ui_settingsdlg.Ui_SettingsDialog, QtWidgets.QDialog):
             self.warn_template_missing_apps.setVisible(
                 self.app_list_manager.has_missing)
 
+        ####### persist tab
+        self.__init_persistence_tab__()
+        self.add_persistent_path_button.clicked.connect(
+            self.__add_persistent_path__
+        )
+        self.remove_persistent_path_button.clicked.connect(
+            self.__remove_persistent_path__
+        )
+        self.persistence_enable_checkbox.stateChanged.connect(
+            self.__custom_persist_enabled_disabled__
+        )
+        self.persistent_home_checkbox.stateChanged.connect(
+            self.__persistent_homedir_enabled_disabled__
+        )
+        self.persistent_usrlocal_checkbox.stateChanged.connect(
+            self.__persistent_usrlocal_enabled_disabled__
+        )
+
     def setup_application(self):
         self.qapp.setApplicationName(self.tr("Qube Settings"))
         self.qapp.setWindowIcon(QtGui.QIcon.fromTheme("qubes-manager"))
@@ -319,6 +342,9 @@ class VMSettingsWindow(ui_settingsdlg.Ui_SettingsDialog, QtWidgets.QDialog):
             ret_tmp = self.__apply_services_tab__()
             if ret_tmp:
                 ret += [self.tr("Sevices tab:")] + ret_tmp
+            ret_tmp = self.__apply_persistence_tab__()
+            if ret_tmp:
+                ret += [self.tr("Persistence tab:")] + ret_tmp
         except qubesadmin.exc.QubesException as qex:
             ret.append(self.tr('Error while saving changes: ') + str(qex))
         except Exception as ex:  # pylint: disable=broad-except
@@ -1409,6 +1435,12 @@ class VMSettingsWindow(ui_settingsdlg.Ui_SettingsDialog, QtWidgets.QDialog):
                     '',
                     self.tr('Service already on the list!'))
                 return
+            if f"{SERVICE_PREFIX}{srv}" in INTERNAL_SERVICE_FEATURES:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    '',
+                    self.tr('Cannot add an internal service here!'))
+                return
             item = QtWidgets.QListWidgetItem(srv)
             item.setCheckState(ui_settingsdlg.QtCore.Qt.Checked)
             self.services_list.addItem(item)
@@ -1517,6 +1549,127 @@ class VMSettingsWindow(ui_settingsdlg.Ui_SettingsDialog, QtWidgets.QDialog):
         for i in {index.row() for index
                   in self.rulesTreeView.selectedIndexes()}:
             self.fw_model.remove_child(i)
+
+    ######## persistence tab
+
+    def __init_persistence_tab__(self):
+        self.persistent_objects_list = set()
+        custom_persistence_enabled = bool(self.vm.features.get(
+            f"{SERVICE_PREFIX}custom-persist", False
+        ))
+
+        if self.vm.klass != "AppVM":
+            self.tabWidget.setTabEnabled(
+                self.tabs_indices["persistence"], False
+            )
+
+        self.persistence_enable_checkbox.setChecked(custom_persistence_enabled)
+        self.__custom_persist_enabled_disabled__()
+
+        for feature in self.vm.features:
+            if feature.startswith(CUSTOM_PERSIST_PREFIX) and \
+                    feature not in INTERNAL_SERVICE_FEATURES:
+                self.persistent_objects_list.add(self.vm.features[feature])
+
+        try:
+            self.refresh_persistent_paths_list()
+        except qubesadmin.exc.QubesDaemonAccessError:
+            self.tabWidget.setTabEnabled(
+                self.tabs_indices["persistence"], False
+            )
+            return
+
+
+    def __add_persistent_path__(self):
+        new_path = self.persistent_path_input.text()
+        if new_path:
+            if os.path.isabs(new_path):
+                self.persistent_objects_list.add(new_path)
+                self.persistent_path_input.clear()
+                self.refresh_persistent_paths_list()
+
+    def __remove_persistent_path__(self):
+        current_item = self.persistent_paths_list.currentItem()
+        if not current_item:
+            return
+        self.persistent_objects_list.remove(current_item.text())
+        self.refresh_persistent_paths_list()
+
+    def __custom_persist_enabled_disabled__(self):
+        custom_persist_enabled = self.persistence_enable_checkbox.isChecked()
+        self.persistent_home_checkbox.setEnabled(custom_persist_enabled)
+        self.persistent_usrlocal_checkbox.setEnabled(custom_persist_enabled)
+        self.persistent_usrlocal_checkbox.setEnabled(custom_persist_enabled)
+        self.persistent_path_input.setEnabled(custom_persist_enabled)
+        self.add_persistent_path_button.setEnabled(custom_persist_enabled)
+        self.persistent_paths_list.setEnabled(custom_persist_enabled)
+        self.remove_persistent_path_button.setEnabled(custom_persist_enabled)
+
+    def __persistent_homedir_enabled_disabled__(self):
+        if self.persistent_home_checkbox.isChecked():
+            self.persistent_objects_list.add('/home')
+        else:
+            self.persistent_objects_list.discard('/home')
+        self.refresh_persistent_paths_list()
+
+    def __persistent_usrlocal_enabled_disabled__(self):
+        if self.persistent_usrlocal_checkbox.isChecked():
+            self.persistent_objects_list.add('/usr/local')
+        else:
+            self.persistent_objects_list.discard('/usr/local')
+        self.refresh_persistent_paths_list()
+
+    def __apply_persistence_tab__(self):
+        msg = []
+
+        if not self.tabWidget.isTabEnabled(self.tabs_indices['persistence']):
+            return msg
+
+        if self.persistence_enable_checkbox.isChecked():
+            self.vm.features[CUSTOM_PERSIST_SERVICE] = 1
+        else:
+            if CUSTOM_PERSIST_SERVICE in self.vm.features:
+                del self.vm.features[CUSTOM_PERSIST_SERVICE]
+
+        try:
+            for feature in self.vm.features:
+                if feature.startswith(CUSTOM_PERSIST_PREFIX) and \
+                        feature not in INTERNAL_SERVICE_FEATURES:
+                    del self.vm.features[feature]
+
+            i = 0
+            for path in sorted(self.persistent_objects_list):
+                i += 1
+                path_alphanum = re.sub(
+                    r'[^a-zA-Z0-9_]+', '', path.replace('/', '_').lower()
+                )
+                key_name = f"{CUSTOM_PERSIST_PREFIX}{i:04d}{path_alphanum}"
+                self.vm.features[key_name[:68]] = path
+        except qubesadmin.exc.QubesException as ex:
+            msg.append(str(ex))
+
+        return msg
+
+    def refresh_persistent_paths_list(self):
+        self.persistent_paths_list.clear()
+
+        # block signals to prevent this method to be called at multiple times
+        self.persistent_home_checkbox.blockSignals(True)
+        self.persistent_home_checkbox.setChecked(
+            '/home' in self.persistent_objects_list
+        )
+        self.persistent_home_checkbox.blockSignals(False)
+
+        self.persistent_usrlocal_checkbox.blockSignals(True)
+        self.persistent_usrlocal_checkbox.setChecked(
+            '/usr/local' in self.persistent_objects_list
+        )
+        self.persistent_usrlocal_checkbox.blockSignals(False)
+
+        for persistent_path in sorted(self.persistent_objects_list):
+            self.persistent_paths_list.addItem(
+                QtWidgets.QListWidgetItem(persistent_path)
+            )
 
 
 parser = QubesArgumentParser(vmname_nargs=1)
