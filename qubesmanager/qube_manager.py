@@ -33,6 +33,9 @@ from qubesadmin import utils
 from qubesadmin.tools import qvm_start
 
 # pylint: disable=import-error
+from PyQt5 import QtWidgets
+
+# pylint: disable=import-error
 from PyQt5.QtCore import (Qt, QAbstractTableModel, QObject, pyqtSlot, QEvent,
     QSettings, QRegExp, QSortFilterProxyModel, QSize, QPoint, QTimer)
 
@@ -893,15 +896,6 @@ class VmManagerWindow(ui_qubemanager.Ui_VmManagerWindow, QMainWindow):
 
     def change_network(self, netvm_name):
         selected_vms = self.get_selected_vms()
-        reply = QMessageBox.question(
-            self, self.tr("Network Change Confirmation"),
-            self.tr("Do you want to change '{0}'<br>"
-                "to Network <b>'{1}'</b>?").format(
-                ', '.join(vm.name for vm in selected_vms), netvm_name),
-            QMessageBox.Yes | QMessageBox.Cancel)
-
-        if reply != QMessageBox.Yes:
-            return
 
         if netvm_name:
             check_power = any(info.state['power'] == 'Running' for info
@@ -911,18 +905,45 @@ class VmManagerWindow(ui_qubemanager.Ui_VmManagerWindow, QMainWindow):
             else:
                 netvm = self.qubes_cache.get_vm(name=netvm_name)
                 netvm = netvm.vm
-            if check_power and netvm and not netvm.is_running():
-                reply = QMessageBox.question(
-                    self, self.tr("Qube Start Confirmation"),
-                    self.tr("<br>Can not change netvm to a halted Qube.<br>"
-                        "Do you want to start the Qube <b>'{0}'</b>?").format(
-                        netvm_name),
-                    QMessageBox.Yes | QMessageBox.Cancel)
 
-                if reply == QMessageBox.Yes:
-                    self.start_vm(netvm, True)
-                else:
-                    return
+            if netvm:
+                vms_tags = {tag
+                            for selected_vm in selected_vms
+                            for tag in selected_vm.vm.tags}
+                if 'anon-vm' in vms_tags and not 'anon-gateway' in netvm.tags:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        self.tr("Warning!"),
+                        self.tr(
+                            "Anonymous qubes must be connected to an anonymous "
+                            "gateway to ensure privacy and anonymity. By "
+                            "changing the net qube to a gateway that does not "
+                            "provide anonymity, your IP address will be leaked "
+                            "on the Internet. Continue at your own risk.")
+                    )
+
+        reply = QMessageBox.question(
+            self, self.tr("Network Change Confirmation"),
+            self.tr("Do you want to change '{0}'<br>"
+                    "to Network <b>'{1}'</b>?").format(
+                ', '.join(vm.name for vm in selected_vms), netvm_name),
+            QMessageBox.Yes | QMessageBox.Cancel)
+
+        if reply != QMessageBox.Yes:
+            return
+
+        if netvm_name and check_power and netvm and not netvm.is_running():
+            reply = QMessageBox.question(
+                self, self.tr("Qube Start Confirmation"),
+                self.tr("<br>Can not change netvm to a halted Qube.<br>"
+                        "Do you want to start the Qube <b>'{0}'</b>?").format(
+                    netvm_name),
+                QMessageBox.Yes | QMessageBox.Cancel)
+
+            if reply == QMessageBox.Yes:
+                self.start_vm(netvm, True)
+            else:
+                return
 
         errors = []
         for info in self.get_selected_vms():
